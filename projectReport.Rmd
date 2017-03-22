@@ -1,0 +1,255 @@
+---
+title: "Practical ML Course Project"
+author: "Yap Ching Loong Ian"
+date: "March 22, 2017"
+output: html_document
+---
+*An earlier submission was made, dated March 21, 2017. It has been revised to include results from further investigation.*
+<br>
+<br>
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, results = "show", cache = T)
+library(caret)
+library(dplyr)
+library(ggplot2)
+library(parallel)
+library(doParallel)
+
+# Set up parallelization
+cluster <- makeCluster(detectCores() - 1)
+registerDoParallel(cluster)
+
+set.seed(20)
+```
+
+
+## 1. Executive Summary
+
+This report documented the attempt to predict the quality of an exercise routine using machine learning (ML). A set of measurement data containing accelerometer readings, time, subject and other identifiers was collected by a [group](http://groupware.les.inf.puc-rio.br/har#weight_lifting_exercises) of researchers. A subset of this data was provided for this exercise and pre-split into two groups, **training** and **testing**. Exercise quality was given  by the variable **classe**, a metric split into 5 levels (A-E). This was provided only for the training set. The task was to train a machine learning (ML) algorithm on the training set to predict **classe** in the testing set. No restrictions were placed on the variables that could be used.
+
+An exploratory data analysis was done and it was determined that a single predictor **raw_timestamp_part_1** provided sufficient differentiation with respect to **classe**.
+
+A classification tree model was applied to the training set using only **raw_timestamp_part_1** and the accuracy on the cross-validation (CV) set was found to be above 99%. Predictions for the testing set were checked through the course Quiz and were found to be 100% correct. This approach sufficiently met the requirements of the project task.
+
+Secondary investigation on using just sensor data alone was done. With pure random partitioning of 80% training, 20% CV, a bagged tree ML algorithm managed to achieve >99% on the CV set. However, with partitioning by subject (5 subjects for training, 1 subject for CV), the same algorithm achieved a dismal 24% accuracy.
+<br>
+<br>
+
+## 2. Exploratory Data Analysis
+
+Having looked at [reviews](https://www.class-central.com/mooc/1719/coursera-practical-machine-learning) for this course, this author was made aware of the deficiencies of the data in the project. In particular, there were variables available that could easily identify **classe** in the testing set, given that it's really a "subset" of the training data (i.e. some points removed from time series data from each subject to form the testing set). An exploratory analysis was first done and the following graph was obtained.
+
+```{r blk1, fig.width=10, fig.cap="*Plot of roll_belt vs. raw_timestamp_part_1 with all the training and testing data. Coloring is by classe and testing data are marked as another class here. Y-axis variable was arbitrarily chosen. Eurico also appears to have some mislabeled data.*"}
+trainData <- read.csv("pml-training.csv", header = TRUE)
+testData <- read.csv("pml-testing.csv", header = TRUE)
+testData$classe <- "Test"
+testData$problem_id <- NULL
+
+# Combine the data
+allData <- rbind(trainData, testData)
+
+# Plot the graph
+ggplot(allData, aes(x = raw_timestamp_part_1, y = roll_belt)) + 
+        geom_point(aes(color = classe, shape = classe, size = classe)) +
+        scale_color_manual(values = c("purple", "dark green", "blue", "red", "yellow", "black")) +
+        scale_shape_manual(values = c(20, 20, 20, 20, 20, 8)) +
+        scale_size_manual(values = c(1, 1, 1, 1, 1, 8)) +
+        facet_wrap(~ user_name, scales = "free")
+```
+
+One can clearly see that the testing data "fitted" nicely into the test subjects' time series and hence the variables **user_name** and **raw_timestamp_part_1** appear to provide a straightforward way to determine the testing data **classe** outcome.
+
+In fact, if we were to simply plot all of the subjects measurements on 1 plot:
+
+```{r blk1_1, fig.width=10, fig.cap="*Plot of roll_belt vs. raw_timestamp_part_1 for all subjects, with coloring by subjects. It's clear that raw_timestamp_part_1 provides clear differentiation among subjects.*"}
+ggplot(allData, aes(raw_timestamp_part_1, y = roll_belt)) + 
+    geom_point(aes(color = user_name, shape = user_name), size = 1)
+```
+It appears that **user_name** will not be necessary since the subjects were tested at times pretty far apart.
+<br>
+<br>
+
+## 3. ML with **raw_timestamp_part_1** only
+
+### Modeling + Cross-Validation
+The data was 1st partitioned into 80% training, 20% CV. 
+
+```{r blk2}
+trainData <- read.csv("pml-training.csv", header = TRUE)
+
+# Select only the relevant columns
+trainData <- select(trainData, raw_timestamp_part_1, user_name, roll_belt, classe) # user_name and roll_belt kept for plotting purposes later
+
+# Data partitioning
+indTrain <- createDataPartition(y = trainData$classe, p = 0.8, list = FALSE)
+trueTrain <- trainData[indTrain, ]
+cvTrain <- trainData[-indTrain, ]
+```
+
+A classification tree algorithm with default parameters was applied. This algorithm was chosen because of its parsimony.
+
+```{r blk3}
+# Fit a classification tree model
+modFit <- train(classe ~ raw_timestamp_part_1, trueTrain, method = 'rpart')
+modFit
+```
+
+Sadly, it appeared that only an accuracy of 99.2% can be achieved.
+
+This model was then used to predict the CV set and a confusion matrix was generated.
+
+
+```{r blk4}
+# Predict on the CV data
+cvPredict <- predict(modFit, cvTrain)
+
+# Generate confusion matrix
+confusionMatrix(cvPredict, cvTrain$classe)
+```
+
+The accuracy on the CV set was 99.4%, comparable to the training set. Exploring the mis-classified data points, 
+
+```{r blk5, fig.width=10, fig.cap="*Plot of roll_belt vs. raw_timestamp_part_1 and coloring by classe, using the whole training set data. Misclassified CV obserations were marked with asterisk.*" }
+ggplot(trainData, aes(x = raw_timestamp_part_1, y = roll_belt)) + 
+        geom_point(aes(color = classe), size = 1) +
+        scale_color_manual(values = c("purple", "dark green", "blue", "red", "yellow")) + 
+        geom_point(data = cvTrain[cvPredict != cvTrain$classe, ], 
+                   aes(x = raw_timestamp_part_1, y = roll_belt), 
+                   shape = 8, 
+                   size = 6) + 
+        facet_wrap(~ user_name, scales = "free")
+```
+
+It's clear that the mis-classification occurs at the time boundaries between different **classe**, as might be expected. Given that the testing set times do not appear to have such time boundary issues, as well as the high accuracy of the present model, this author did not pursue the use of other predictors/models.
+
+
+### Application to Testing Set
+The application on the testing set is fairly straightforward. The predictions made through the model led to a 100% grade on the quiz.
+
+```{r blk6}
+testData <- read.csv("pml-testing.csv", header = TRUE)
+
+# Select only the relevant columns
+testData <- select(testData, raw_timestamp_part_1, user_name, problem_id) # user_name retained for easy reference
+
+# Prediction
+testData$estClasse <- predict(modFit, testData)
+testData <- arrange(testData, user_name, raw_timestamp_part_1)
+testData
+```
+<br>
+<br>
+
+## 4. ML without using obvious identifiers
+
+This section will describe the ML modeling without using the obvious identifiers. No prediction was done on the testing set (as provided for the Quiz) but cross-validation results are presented.
+
+### Modeling + Cross-Validation
+
+The data was read in and some cleanup was performed, with largely empty columns and obvious identifiers removed.
+
+```{r blk 6}
+trainData <- read.csv("pml-training.csv", header = TRUE)
+
+# Clean data with too many NA or ""
+varfracBad <- apply(trainData, 2, function(x) sum(is.na(x) | x == "") / length(x))
+varIndToThrow <- which(varfracBad > 0.25)
+varIndToThrow <- union(1 : 7, varIndToThrow) # 1-7 contain identifiers
+trainData[, varIndToThrow] <- NULL
+
+## Summary of variables
+data.frame(var = names(trainData), 
+           class = sapply(seq_len(ncol(trainData)), function(x) class(trainData[, x])), 
+           hasNA = apply(trainData, 2, function(x) any(is.na(x))),
+           row.names = NULL)
+```
+
+The original partitioning done earlier was used here in the model. A bagged tree classification model was used. 
+```{r blk 7, resuts="hide"}
+fitCtrl <- trainControl(method = "cv",               # K-fold CV-10 folds(default)
+                        number = 8,                  # No. of sets of K-fold
+                        allowParallel = TRUE)
+myTreeBagModel <- train(classe ~ .,
+                   method = "treebag", 
+                   nbagg = 20,                        # 20 trees
+                   preProcess = c("scale", "center"), # pre-processing with standardization
+                   data = trueTrain,
+                   trControl = fitCtrl)
+```
+
+The results from the K-fold CV were:
+
+```{r blk 8}
+myTreeBagModel$resample
+```
+
+The "internal" CV were pretty good, all above 99%. 
+
+The results from the final CV were:
+```{r blk 9}
+# Check results against CV set
+myPreds <- predict(myTreeBagModel, cvTrain)
+confusionMatrix(myPreds, cvTrain$classe)
+```
+These true CV results were also great: above 99%.
+<br>
+<br>
+
+## 5. ML using 1 test subject as cross-validation
+
+A truer way of determining generalizability would be to remove 1 subject from the training set completely and do cross-validation on him/her. The same cleanup and ML algorithm (bagged tree) was applied here:
+
+```{r blk 11}
+trainData <- read.csv("pml-training.csv", header = TRUE)
+
+# Identify 1 user to be test set
+indTrain <- which(trainData$user_name != "eurico")
+
+# Clean data with too many NA or ""
+varfracBad <- apply(trainData, 2, 
+                    function(x) sum(is.na(x) | x == "") / length(x))
+varIndToThrow <- which(varfracBad > 0.25)
+varIndToThrow <- union(1 : 7, varIndToThrow) # 1-7 contain identifiers
+trainData[, varIndToThrow] <- NULL
+
+# Partition the data
+trueTrain <- trainData[indTrain, ]
+cvTrain <- trainData[-indTrain, ]
+
+# Fit bagged tree model
+fitCtrl <- trainControl(method = "cv",               # K-fold CV-10 folds(default)
+                        number = 8,                  # No. of sets of K-fold
+                        allowParallel = TRUE)
+myTreeBagModel <- train(classe ~ .,
+                   method = "treebag", 
+                   nbagg = 20,                        # 20 trees
+                   preProcess = c("scale", "center"), # pre-processing with standardization
+                   data = trueTrain,
+                   trControl = fitCtrl)
+
+# Check accuracy from internal CV
+myTreeBagModel$resample
+
+# Check results against CV set
+myPreds <- predict(myTreeBagModel, cvTrain)
+confusionMatrix(myPreds, cvTrain$classe)
+```
+
+While the internal CV results were fantastic at >98%, the algorithm completely failed with the new subject, **eurico**, achieving an accuracy of only 24%, slightly better than random. This was not particularly surprising, given what was found in the exploratory analysis section.
+<br>
+<br>
+
+## Final Remarks
+
+It's clear that our 1st ML approach using the time variable was fairly silly and non-generalizable despite giving highly accurate results for the testing data. 
+
+The 2nd approach using pure sensor readings also had very good cross-validation results. 
+
+However, the same classification algorithm trained on 5 subjects and cross-validated on a 6th gave rubbish results, achieving just slightly better accuracy than chance. It's clear that the either more training data is required or the general approach of using the data as-is is unsuitable. More reliable classification of quality may require the analysis of a whole time series rather than single points in time. This author noted that the original authors of the study used methods such as windowing and measured parameters such as kurtosis and skew of several measurements for each window. This line of approach is however beyond the scope of this project.
+
+```{r blk_end, echo=FALSE}
+# End parallelization
+stopCluster(cluster)
+registerDoSEQ()
+```
